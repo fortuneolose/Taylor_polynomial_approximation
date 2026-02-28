@@ -1,0 +1,25 @@
+# IDE / editor artefacts
+.vscode/
+.idea/
+*.code-workspace
+
+# AWS / cloud tool caches
+.aws/
+
+# Xilinx / EDA tool logs
+.Xilinx/
+.Vivado/
+
+# OS artefacts
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Simulation build artefacts (keep .vcd and .vvp inside the project folder)
+*.log

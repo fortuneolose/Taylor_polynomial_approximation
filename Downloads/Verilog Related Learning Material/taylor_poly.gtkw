@@ -1,0 +1,105 @@
+[*]
+[*] GTKWave save file  –  Taylor Polynomial Evaluator
+[*]
+[dumpfile] "C:/Users/avent/Downloads/Verilog Related Learning Material/taylor_poly.vcd"
+[savefile] "C:/Users/avent/Downloads/Verilog Related Learning Material/taylor_poly.gtkw"
+[timestart] 0
+[size] 1680 950
+[pos] 0 0
+*-22.500000 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+[treeopen] taylor_poly_tb.
+[treeopen] taylor_poly_tb.dut_quad.
+[treeopen] taylor_poly_tb.dut_exp.
+[sst_width] 280
+[signals_width] 270
+[sst_expanded] 1
+[sst_vpaned_height] 300
+
+-
+@28
+taylor_poly_tb.clk
+@28
+taylor_poly_tb.rst_n
+
+@8
+-
+@8
+-──────────────────────────────────────────────────
+@8
+-  DUT 1 │ f(x) = x²   ORDER=2   latency=3 cycles
+@8
+-──────────────────────────────────────────────────
+@28
+taylor_poly_tb.quad_vin
+@28
+taylor_poly_tb.quad_vout
+@38
+taylor_poly_tb.quad_xin[31:0]
+@38
+taylor_poly_tb.quad_yout[31:0]
+
+@8
+-
+@8
+-  DUT 1 pipeline  (Horner stage wires are combinational)
+@8
+-  Stage 1: coeff_k = c1 = 0,  prod_trunc = dx × c2
+@38
+taylor_poly_tb.dut_quad.g_horner[1].coeff_k[31:0]
+@38
+taylor_poly_tb.dut_quad.g_horner[1].prod_trunc[31:0]
+@8
+-  Stage 2: coeff_k = c0 = 0,  prod_trunc = dx × (c1 + dx·c2)  →  dx²
+@38
+taylor_poly_tb.dut_quad.g_horner[2].coeff_k[31:0]
+@38
+taylor_poly_tb.dut_quad.g_horner[2].prod_trunc[31:0]
+
+@8
+-
+@8
+-──────────────────────────────────────────────────
+@8
+-  DUT 2 │ e^x  5-term   ORDER=4   latency=5 cycles
+@8
+-──────────────────────────────────────────────────
+@28
+taylor_poly_tb.exp_vin
+@28
+taylor_poly_tb.exp_vout
+@38
+taylor_poly_tb.exp_xin[31:0]
+@38
+taylor_poly_tb.exp_yout[31:0]
+
+@8
+-
+@8
+-  DUT 2 pipeline  (Horner stage wires)
+@8
+-  Stage 1: coeff_k = c3 = 1/6,   prod_trunc = dx × c4
+@38
+taylor_poly_tb.dut_exp.g_horner[1].coeff_k[31:0]
+@38
+taylor_poly_tb.dut_exp.g_horner[1].prod_trunc[31:0]
+@8
+-  Stage 2: coeff_k = c2 = 1/2,   prod_trunc = dx × (c3 + dx·c4)
+@38
+taylor_poly_tb.dut_exp.g_horner[2].coeff_k[31:0]
+@38
+taylor_poly_tb.dut_exp.g_horner[2].prod_trunc[31:0]
+@8
+-  Stage 3: coeff_k = c1 = 1,     prod_trunc = dx × (c2 + dx·(c3 + dx·c4))
+@38
+taylor_poly_tb.dut_exp.g_horner[3].coeff_k[31:0]
+@38
+taylor_poly_tb.dut_exp.g_horner[3].prod_trunc[31:0]
+@8
+-  Stage 4: coeff_k = c0 = 1,     prod_trunc = dx × (...)  →  final multiply
+@38
+taylor_poly_tb.dut_exp.g_horner[4].coeff_k[31:0]
+@38
+taylor_poly_tb.dut_exp.g_horner[4].prod_trunc[31:0]
+
+[pattern_trace] 1
+[pattern_trace] 0
