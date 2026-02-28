@@ -16,6 +16,7 @@ A fully parameterisable, pipelined Verilog module that evaluates any Taylor-seri
 9. [Waveforms](#9-waveforms)
 10. [File Structure](#10-file-structure)
 11. [Running the Simulation](#11-running-the-simulation)
+12. [Design Revisions (v2)](#12-design-revisions-v2)
 
 ---
 
@@ -101,7 +102,7 @@ Range : [-32768 , +32767.99998]
 Resolution: 2^-16 ≈ 1.526 × 10^-5
 ```
 
-### Multiplication and Truncation
+### Multiplication and Rounding
 
 Multiplying two Q(15.16) values yields a Q(30.32) result in 64 bits. To return to Q(15.16), bits `[DATA_WIDTH+FRAC_BITS-1 : FRAC_BITS]` are extracted:
 
@@ -111,7 +112,13 @@ Full product (64 bits):   [ sign | 30 int bits | 32 frac bits ]
 Extract [47:16]  →  32-bit Q(15.16) result
 ```
 
-This is equivalent to rounding the fixed-point result toward zero (truncation). One LSB of error (≤ 2⁻¹⁶) is introduced per multiplication. Over $N$ pipeline stages, the worst-case accumulated rounding error is $N \times 2^{-16}$.
+The original implementation truncated toward zero, which introduced a systematic negative bias. The revised implementation uses **round-half-up**: a bias of $2^{F-1}$ (half an LSB in the full-precision domain, `ROUND_HALF = 1 << (FRAC_BITS-1)`) is added to the 64-bit product before the bit-selection step. This eliminates the systematic bias and keeps individual rounding error bounded within ±0.5 LSB. Over $N$ Horner stages, the worst-case accumulated rounding magnitude is:
+
+$$\text{err}_{\max} = \tfrac{1}{2}(1 + |dx| + |dx|^2 + \cdots + |dx|^{N-1}) \;\text{LSBs}$$
+
+### Overflow and Saturation
+
+Without protection, the Q(15.16) adder can silently wrap around on overflow, producing a result with the wrong sign. The revised implementation widens the addition to `DATA_WIDTH+1` bits (`sum_wide`) to expose the carry/borrow, then **saturates** to `SAT_MAX` = `2^(DATA_WIDTH-1) − 1` or `SAT_MIN` = `−2^(DATA_WIDTH-1)` when the two MSBs of `sum_wide` differ (signed overflow detected).
 
 ---
 
@@ -137,29 +144,55 @@ x_in ───►│ Stage 0: dx = x_in − X0 │ acc ← c_N                  
 
 Each stage contains:
 - One **64-bit signed multiplier** (`dx × acc`)
-- One **32-bit adder** (`c_k + prod_trunc`)
-- One **truncation** (select bits `[47:16]` of the 64-bit product)
-- Three **pipeline registers** (`dx_r`, `acc_r`, `vld_r`)
+- One **round-half-up bias adder** (adds `ROUND_HALF` before truncation)
+- One **32-bit saturating adder** (`c_k + prod_round`, widened to detect overflow)
+- Three **pipeline registers** (`dx_r[0:ORDER-1]`, `acc_r`, `vld_r`)
 
-`dx` is forwarded alongside the accumulator so every stage uses the same `dx` value without recomputing it.
+`dx` is forwarded through a reduced register chain (`dx_r[0:ORDER-1]`) so every stage uses the same `dx` value. The final stage does not write `dx_r` since no further stage consumes it, saving one register.
 
-### Generate Loop (Verilog)
+### Generate Loop (Verilog — v2)
 
 ```verilog
+localparam LATENCY   = ORDER + 1;
+localparam DX_STAGES = (ORDER > 0) ? ORDER : 1;
+localparam [2*DATA_WIDTH-1:0] ROUND_HALF =
+    (FRAC_BITS > 0) ? ({{(2*DATA_WIDTH-1){1'b0}}, 1'b1} << (FRAC_BITS - 1))
+                    : {2*DATA_WIDTH{1'b0}};
+
+reg signed [DATA_WIDTH-1:0] dx_r  [0:DX_STAGES-1];   // reduced array
+reg signed [DATA_WIDTH-1:0] acc_r [0:ORDER];
+reg                         vld_r [0:ORDER];
+
 genvar i;
 generate
     for (i = 1; i <= ORDER; i = i + 1) begin : g_horner
         wire signed [2*DATA_WIDTH-1:0] prod_full;
-        wire signed [DATA_WIDTH-1:0]   prod_trunc;
+        wire        [2*DATA_WIDTH-1:0] prod_biased;   // + 0.5 LSB
+        wire signed [DATA_WIDTH-1:0]   prod_round;
         wire signed [DATA_WIDTH-1:0]   coeff_k;
+        wire signed [DATA_WIDTH:0]     sum_wide;      // one extra bit
 
-        assign coeff_k    = COEFFS[(ORDER-i)*DATA_WIDTH +: DATA_WIDTH];
-        assign prod_full  = dx_r[i-1] * acc_r[i-1];
-        assign prod_trunc = prod_full[DATA_WIDTH+FRAC_BITS-1 : FRAC_BITS];
+        assign coeff_k     = COEFFS[(ORDER-i)*DATA_WIDTH +: DATA_WIDTH];
+        assign prod_full   = $signed(dx_r[i-1]) * $signed(acc_r[i-1]);
+        assign prod_biased = prod_full + ROUND_HALF;  // round-half-up
+        assign prod_round  = prod_biased[DATA_WIDTH+FRAC_BITS-1 : FRAC_BITS];
+        assign sum_wide    = {coeff_k[DATA_WIDTH-1], coeff_k}
+                           + {prod_round[DATA_WIDTH-1], prod_round};
 
-        always @(posedge clk or negedge rst_n) begin
-            ...
-            acc_r[i] <= coeff_k + prod_trunc;
+        always @(posedge clk) begin   // synchronous active-low reset
+            if (!rst_n) begin
+                acc_r[i] <= {DATA_WIDTH{1'b0}};
+                vld_r[i] <= 1'b0;
+                if (i < ORDER) dx_r[i] <= {DATA_WIDTH{1'b0}};
+            end else begin
+                // saturate on signed overflow
+                if (sum_wide[DATA_WIDTH] != sum_wide[DATA_WIDTH-1])
+                    acc_r[i] <= sum_wide[DATA_WIDTH] ? SAT_MIN : SAT_MAX;
+                else
+                    acc_r[i] <= sum_wide[DATA_WIDTH-1:0];
+                vld_r[i] <= vld_r[i-1];
+                if (i < ORDER) dx_r[i] <= dx_r[i-1];  // suppress at last stage
+            end
         end
     end
 endgenerate
@@ -205,7 +238,8 @@ module taylor_poly #(
 | `valid_in` | Assert for one clock cycle per input sample. |
 | `valid_out` | Pulses high exactly `ORDER + 1` cycles after `valid_in`. |
 | Throughput | One result per clock (fully pipelined, no stalls). |
-| Reset | Asynchronous active-low. De-assertion is synchronous (next posedge). |
+| Latency | `localparam LATENCY = ORDER + 1` cycles (self-documented in RTL). |
+| Reset | **Synchronous** active-low. All registers clear on the rising edge that captures `rst_n = 0`. |
 
 ---
 
@@ -316,7 +350,7 @@ This is also the function studied in `Taylor_series.m`.
 
 ## 8. Simulation Results
 
-Simulation run with **Icarus Verilog 12** (`iverilog -g2001`). All 13 test vectors pass.
+Simulation run with **Vivado XSim v2025.1.1** (and cross-verified with Icarus Verilog 12). All 13 test vectors pass.
 
 ```
 =============================================================
@@ -450,3 +484,128 @@ Runs the same 13 test vectors using Python-native integer arithmetic that exactl
 | Different expansion point | Set `X0` to a non-zero fixed-point value |
 | Wider integer range | Increase `DATA_WIDTH` |
 | Synthesise for FPGA | All constructs are Verilog-2001 compliant; no vendor primitives used |
+
+---
+
+## 12. Design Revisions (v2)
+
+The following improvements were applied to both the RTL module (`taylor_poly.v`) and the testbench (`taylor_poly_tb.v`) after the initial implementation. Each fix addresses a real synthesis or verification concern.
+
+---
+
+### RTL — `taylor_poly.v`
+
+#### Fix 1 — Synchronous Active-Low Reset
+
+| | Before | After |
+|:--|:-------|:------|
+| Sensitivity list | `@(posedge clk or negedge rst_n)` | `@(posedge clk)` |
+| Reset check | Outside the clock edge | `if (!rst_n)` inside the clocked block |
+
+**Why it matters:** An asynchronous reset with a `negedge` in the sensitivity list creates a path from `rst_n` directly to the flip-flop asynchronous clear pin. In FPGA flows this can cause timing-analysis complications and glitch sensitivity. Synthesis tools strongly prefer the synchronous pattern — the reset is captured on the rising clock edge, integrating cleanly into the setup/hold timing closure flow.
+
+---
+
+#### Fix 2 — Reduced `dx_r` Register Array
+
+| | Before | After |
+|:--|:-------|:------|
+| Array declaration | `reg signed [DATA_WIDTH-1:0] dx_r [0:ORDER]` | `reg signed [DATA_WIDTH-1:0] dx_r [0:DX_STAGES-1]` where `DX_STAGES = (ORDER > 0) ? ORDER : 1` |
+| Final-stage write | `dx_r[ORDER] <= dx_r[ORDER-1]` | Suppressed (`if (i < ORDER)` guard) |
+
+**Why it matters:** `dx_r[ORDER]` was written every cycle but never read — a dead register that wasted flip-flop resources and confused synthesis linting tools. Removing it reduces register count by one `DATA_WIDTH`-bit register per instantiation.
+
+---
+
+#### Fix 3 — Saturation Arithmetic
+
+| | Before | After |
+|:--|:-------|:------|
+| Adder width | `DATA_WIDTH` bits | `DATA_WIDTH+1` bits (`sum_wide`) |
+| Overflow action | Silent two's-complement wrap | Clamp to `SAT_MAX` / `SAT_MIN` |
+
+```verilog
+// Overflow detection: MSBs of sum_wide differ → overflow occurred
+if (sum_wide[DATA_WIDTH] != sum_wide[DATA_WIDTH-1])
+    acc_r[i] <= sum_wide[DATA_WIDTH] ? SAT_MIN : SAT_MAX;
+else
+    acc_r[i] <= sum_wide[DATA_WIDTH-1:0];
+```
+
+**Why it matters:** Without saturation, a large input that causes the accumulator to overflow produces a result with the wrong sign — a silent, hard-to-debug error. Saturation limits the damage: the output clips to the representable extreme rather than wrapping to a nonsensical value.
+
+---
+
+#### Fix 4 — Round-Half-Up (replaces truncation)
+
+| | Before | After |
+|:--|:-------|:------|
+| Fractional discard | Truncate toward zero | Add `ROUND_HALF = 1 << (FRAC_BITS-1)` then truncate |
+| Bias | Systematic −0.5 LSB per multiply | ≤ ±0.5 LSB per multiply |
+
+```verilog
+localparam [2*DATA_WIDTH-1:0] ROUND_HALF =
+    (FRAC_BITS > 0) ? ({{(2*DATA_WIDTH-1){1'b0}}, 1'b1} << (FRAC_BITS - 1))
+                    : {2*DATA_WIDTH{1'b0}};
+
+assign prod_biased = prod_full + ROUND_HALF;
+assign prod_round  = prod_biased[DATA_WIDTH+FRAC_BITS-1 : FRAC_BITS];
+```
+
+**Why it matters:** Truncation always discards the fractional remainder, which biases every result slightly negative. For a 4-stage $e^x$ pipeline this accumulates to a visible systematic error. Round-half-up centring around zero eliminates this bias.
+
+---
+
+#### Fix 5 — `LATENCY` Localparameter
+
+```verilog
+localparam LATENCY = ORDER + 1;
+```
+
+A self-documenting constant expressing the pipeline depth. Testbenches and higher-level wrappers can reference `LATENCY` rather than hard-coding `ORDER + 1`, making the design easier to maintain and less error-prone when `ORDER` is changed.
+
+---
+
+### Testbench — `taylor_poly_tb.v`
+
+#### Fix A — Round-Half-Away-From-Zero in `real_to_fp`
+
+| | Before | After |
+|:--|:-------|:------|
+| Conversion | `$rtoi(r * SCALE)` | `$rtoi(r * SCALE + 0.5)` for `r ≥ 0`, `$rtoi(r * SCALE - 0.5)` for `r < 0` |
+
+**Why it matters:** `$rtoi` truncates toward zero in IEEE-1364. For negative stimulus values (e.g. `x = −3.0`) this caused a systematic ±1 LSB error in the stimulus, meaning the DUT was tested with a slightly wrong input. The fix applies round-half-away-from-zero rounding, matching the behaviour expected from a reference model.
+
+---
+
+#### Fix B — `e^x` Expected Values Derived from Actual FP Coefficients
+
+| | Before | After |
+|:--|:-------|:------|
+| Expected value | Computed from exact mathematical $1/k!$ | Computed from `fp_to_real()` of the same fixed-point literals (`FP_1_6`, `FP_1_24`, …) programmed into the DUT |
+
+```verilog
+// Resolved once at simulation start
+ec0 = fp_to_real(FP_1);      // 1.000 000 00
+ec1 = fp_to_real(FP_1);      // 1.000 000 00
+ec2 = fp_to_real(FP_HALF);   // 0.500 000 00
+ec3 = fp_to_real(FP_1_6);    // 0.166 641 24  ← Q15.16 approximation of 1/6
+ec4 = fp_to_real(FP_1_24);   // 0.041 656 49  ← Q15.16 approximation of 1/24
+```
+
+**Why it matters:** The exact value of $1/6$ is not representable in Q15.16. The DUT uses the closest representable value (`0x00002AAB` = 10923/65536 ≈ 0.16664). Comparing against the ideal $1/6$ created false failures. Deriving expected values from the same fixed-point literals the DUT uses eliminates these false failures and makes the tolerance purely about rounding noise inside the pipeline.
+
+---
+
+#### Fix C — `check_exp` Tolerance Documentation
+
+The tolerance in `check_exp` is now explicitly motivated in a comment:
+
+```
+// Worst-case round-half-up error across ORDER=4 multiply stages (dx=2):
+//   0.5 * (1 + dx + dx² + dx³) = 0.5 * (1+2+4+8) = 7.5 LSBs.
+// 16 LSBs gives a comfortable margin for all test inputs.
+if (err <= (16.0 / $itor(SCALE))) ...
+```
+
+This makes the test self-explanatory and ensures the tolerance is tightened appropriately if `ORDER` or the test vectors change.
